@@ -70,7 +70,7 @@ public class Processor {
     /**
      * The number of retries when testing http connection to the function.
      */
-    private static final int NUM_RETRIES = 20;
+    private static final int NUM_RETRIES = 60;
 
     /**
      * Keeps track of a single gRPC stub per gateway address.
@@ -106,6 +106,7 @@ public class Processor {
         checkEnvironmentVariables();
 
         Hooks.onOperatorDebug();
+        Hooks.onNextDropped((obj) -> new Exception(String.format("[%s] %s", obj.getClass().getSimpleName(), obj.toString())).printStackTrace());
 
         String functionAddress = System.getenv(FUNCTION);
 
@@ -141,7 +142,7 @@ public class Processor {
     private static void assertHttpConnectivity(String functionAddress) throws URISyntaxException, IOException, InterruptedException {
         URI uri = new URI("http://" + functionAddress);
         for (int i = 1; i <= NUM_RETRIES; i++) {
-            try (Socket s = new Socket(uri.getHost(), uri.getPort())) {
+            try (Socket ignored = new Socket(uri.getHost(), uri.getPort())) {
             } catch (ConnectException t) {
                 if (i == NUM_RETRIES) {
                     throw t;
@@ -189,6 +190,7 @@ public class Processor {
                             OutputFrame next = m.getData();
                             FullyQualifiedTopic output = outputs.get(next.getResultIndex());
                             ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = liiklusInstancesPerAddress.get(output.getGatewayAddress());
+                            System.out.format("Publishing payload %s to %s\n", next.getPayload().toStringUtf8(), output.toString());
                             return outputLiiklus.publish(createPublishRequest(next, output.getTopic()));
                         })
                 )
@@ -228,9 +230,12 @@ public class Processor {
                         .build())
                 .build();
 
+        System.out.format("Start frame: %s%n", start);
+
         return riffStub.invoke(Flux.concat(
                 Flux.just(start), //
-                in.map(frame -> InputSignal.newBuilder().setData(frame).build())));
+                in.map(frame -> InputSignal.newBuilder().setData(frame).build()).doOnNext(input -> System.out.format("Input data %s%n", input))
+        ));
     }
 
     /**
@@ -261,6 +266,7 @@ public class Processor {
      * This converts a liiklus received message (representing an at-rest riff {@link Message}) into an RPC {@link InputFrame}.
      */
     private InputFrame toRiffSignal(ReceiveReply receiveReply, FullyQualifiedTopic fullyQualifiedTopic) {
+        System.out.format("building input frame for topic: %s\n", fullyQualifiedTopic.toString());
         int inputIndex = inputs.indexOf(fullyQualifiedTopic);
         if (inputIndex == -1) {
             throw new RuntimeException("Unknown topic: " + fullyQualifiedTopic);
@@ -274,6 +280,7 @@ public class Processor {
                     .setArgIndex(inputIndex)
                     .build();
         } catch (InvalidProtocolBufferException e) {
+            System.err.format("Failed building input %s%n", e);
             throw new RuntimeException(e);
         }
 
