@@ -20,7 +20,10 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
+
+import static java.util.function.Function.identity;
 
 /**
  * Main driver class for the streaming processor.
@@ -171,29 +174,38 @@ public class Processor {
 
     public void run() {
         Flux.fromIterable(inputs)
+                .log("configured inputs")
                 .flatMap(fullyQualifiedTopic -> {
                     ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub inputLiiklus = liiklusInstancesPerAddress.get(fullyQualifiedTopic.getGatewayAddress());
                     return inputLiiklus.subscribe(subscribeRequestForInput(fullyQualifiedTopic.getTopic()))
+                            .log("topic subscription")
                             .filter(SubscribeReply::hasAssignment)
+                            .log("with assignment")
                             .map(SubscribeReply::getAssignment)
+                            .log("get assignment")
                             .flatMap(
                                     assignment -> inputLiiklus
                                             .receive(receiveRequestForAssignment(assignment))
                                             .delayUntil(receiveReply -> ack(fullyQualifiedTopic, inputLiiklus, receiveReply, assignment))
                             )
-                            .map(receiveReply -> toRiffSignal(receiveReply, fullyQualifiedTopic));
+                            .log("receive reply")
+                            .map(receiveReply -> toRiffSignal(receiveReply, fullyQualifiedTopic))
+                            .log("riff signal");
                 })
                 .compose(this::riffWindowing)
+                .log("windowing")
                 .map(this::invoke)
-                .concatMap(flux ->
-                        flux.concatMap(m -> {
-                            OutputFrame next = m.getData();
-                            FullyQualifiedTopic output = outputs.get(next.getResultIndex());
-                            ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = liiklusInstancesPerAddress.get(output.getGatewayAddress());
-                            System.out.format("Publishing payload %s to %s\n", next.getPayload().toStringUtf8(), output.toString());
-                            return outputLiiklus.publish(createPublishRequest(next, output.getTopic()));
-                        })
-                )
+                .log("post-invocation: output signal")
+                .concatMap(identity())
+                .log("identity concatmap")
+                .concatMap(m -> {
+                    OutputFrame next = m.getData();
+                    FullyQualifiedTopic output = outputs.get(next.getResultIndex());
+                    ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = liiklusInstancesPerAddress.get(output.getGatewayAddress());
+                    System.out.format("Publishing payload %s to %s\n", next.getPayload().toStringUtf8(), output.toString());
+                    return outputLiiklus.publish(createPublishRequest(next, output.getTopic()));
+                })
+                .log("publish reply")
                 .blockLast();
     }
 
