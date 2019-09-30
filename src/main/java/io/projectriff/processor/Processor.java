@@ -39,6 +39,8 @@ import static java.util.function.Function.identity;
  */
 public class Processor {
 
+    private static int i;
+
     /**
      * ENV VAR key holding the coordinates of the input streams, as a comma separated list of {@code gatewayAddress:port/streamName}.
      *
@@ -263,6 +265,7 @@ public class Processor {
         return PublishRequest.newBuilder()
                 .setValue(msg.toByteString())
                 .setTopic(topic)
+                .setKey(ByteString.copyFromUtf8("irrelevant" + i++))
                 .build();
     }
 
