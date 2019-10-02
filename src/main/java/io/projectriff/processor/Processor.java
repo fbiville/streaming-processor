@@ -1,13 +1,26 @@
 package io.projectriff.processor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.bsideup.liiklus.protocol.*;
+import com.github.bsideup.liiklus.protocol.AckRequest;
+import com.github.bsideup.liiklus.protocol.Assignment;
+import com.github.bsideup.liiklus.protocol.PublishReply;
+import com.github.bsideup.liiklus.protocol.PublishRequest;
+import com.github.bsideup.liiklus.protocol.ReactorLiiklusServiceGrpc;
+import com.github.bsideup.liiklus.protocol.ReceiveReply;
+import com.github.bsideup.liiklus.protocol.ReceiveRequest;
+import com.github.bsideup.liiklus.protocol.SubscribeReply;
+import com.github.bsideup.liiklus.protocol.SubscribeRequest;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Channel;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
-import io.projectriff.invoker.rpc.*;
+import io.projectriff.invoker.rpc.InputFrame;
+import io.projectriff.invoker.rpc.InputSignal;
+import io.projectriff.invoker.rpc.OutputFrame;
+import io.projectriff.invoker.rpc.OutputSignal;
+import io.projectriff.invoker.rpc.ReactorRiffGrpc;
+import io.projectriff.invoker.rpc.StartFrame;
 import io.projectriff.processor.serialization.Message;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Hooks;
@@ -19,8 +32,15 @@ import java.net.Socket;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Duration;
-import java.util.*;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
+
+import static java.util.function.Function.identity;
 
 /**
  * Main driver class for the streaming processor.
@@ -169,7 +189,11 @@ public class Processor {
     }
 
     public void run() {
-        Flux.fromIterable(inputs)
+        internalRun().blockLast();
+    }
+
+    Flux<PublishReply> internalRun() {
+        return Flux.fromIterable(inputs)
                 .flatMap(fullyQualifiedTopic -> {
                     ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub inputLiiklus = liiklusInstancesPerAddress.get(fullyQualifiedTopic.getGatewayAddress());
                     return inputLiiklus.subscribe(subscribeRequestForInput(fullyQualifiedTopic.getTopic()))
@@ -184,15 +208,13 @@ public class Processor {
                 })
                 .compose(this::riffWindowing)
                 .map(this::invoke)
-                .concatMap(flux ->
-                        flux.concatMap(m -> {
-                            OutputFrame next = m.getData();
-                            FullyQualifiedTopic output = outputs.get(next.getResultIndex());
-                            ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = liiklusInstancesPerAddress.get(output.getGatewayAddress());
-                            return outputLiiklus.publish(createPublishRequest(next, output.getTopic()));
-                        })
-                )
-                .blockLast();
+                .concatMap(identity())
+                .concatMap(m -> {
+                    OutputFrame next = m.getData();
+                    FullyQualifiedTopic output = outputs.get(next.getResultIndex());
+                    ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = liiklusInstancesPerAddress.get(output.getGatewayAddress());
+                    return outputLiiklus.publish(createPublishRequest(next, output.getTopic()));
+                });
     }
 
     private Mono<Empty> ack(FullyQualifiedTopic topic, ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub stub, ReceiveReply receiveReply, Assignment assignment) {
