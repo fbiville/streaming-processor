@@ -3,7 +3,6 @@ package io.projectriff.processor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.bsideup.liiklus.protocol.AckRequest;
 import com.github.bsideup.liiklus.protocol.Assignment;
-import com.github.bsideup.liiklus.protocol.PublishReply;
 import com.github.bsideup.liiklus.protocol.PublishRequest;
 import com.github.bsideup.liiklus.protocol.ReactorLiiklusServiceGrpc;
 import com.github.bsideup.liiklus.protocol.ReceiveReply;
@@ -56,6 +55,55 @@ import static java.util.function.Function.identity;
  */
 public class Processor {
 
+    public static class LiiklusTopics {
+
+        private List<FullyQualifiedTopic> inputs;
+        private List<FullyQualifiedTopic> outputs;
+        private Map<String, ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub> stubPerAddress;
+
+        public LiiklusTopics(String inputs, String outputs) {
+            this.inputs = FullyQualifiedTopic.parseMultiple(inputs);
+            this.outputs = FullyQualifiedTopic.parseMultiple(outputs);
+            Set<FullyQualifiedTopic> topics = new HashSet<>(this.inputs);
+            topics.addAll(this.outputs);
+            this.stubPerAddress = indexByAddress(topics);
+        }
+
+        LiiklusTopics() {
+        }
+
+        public int getOutputCount() {
+            return this.outputs.size();
+        }
+
+        void setInputs(List<FullyQualifiedTopic> inputs) {
+            this.inputs = inputs;
+        }
+
+        void setOutputs(List<FullyQualifiedTopic> outputs) {
+            this.outputs = outputs;
+        }
+
+        void setStubPerAddress(Map<String, ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub> stubPerAddress) {
+            this.stubPerAddress = stubPerAddress;
+        }
+
+        private static Map<String, ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub> indexByAddress(Collection<FullyQualifiedTopic> fullyQualifiedTopics) {
+            return fullyQualifiedTopics.stream()
+                    .map(FullyQualifiedTopic::getGatewayAddress)
+                    .distinct()
+                    .collect(Collectors.toMap(
+                            address -> address,
+                            address -> ReactorLiiklusServiceGrpc.newReactorStub(
+                                    NettyChannelBuilder.forTarget(address)
+                                            .usePlaintext()
+                                            .build())
+                            )
+                    );
+        }
+
+    }
+
     /**
      * ENV VAR key holding the coordinates of the input streams, as a comma separated list of {@code gatewayAddress:port/streamName}.
      *
@@ -92,20 +140,7 @@ public class Processor {
      */
     private static final int NUM_RETRIES = 20;
 
-    /**
-     * Keeps track of a single gRPC stub per gateway address.
-     */
-    private final Map<String, ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub> liiklusInstancesPerAddress;
-
-    /**
-     * The ordered input streams for the function, in parsed form.
-     */
-    private final List<FullyQualifiedTopic> inputs;
-
-    /**
-     * The ordered output streams for the function, in parsed form.
-     */
-    private final List<FullyQualifiedTopic> outputs;
+    private final LiiklusTopics topics;
 
     private final List<String> outputContentTypes;
 
@@ -135,12 +170,10 @@ public class Processor {
                 .usePlaintext()
                 .build();
 
-        List<FullyQualifiedTopic> inputAddressableTopics = FullyQualifiedTopic.parseMultiple(System.getenv(INPUTS));
-        List<FullyQualifiedTopic> outputAdressableTopics = FullyQualifiedTopic.parseMultiple(System.getenv(OUTPUTS));
+        LiiklusTopics liiklusTopics = new LiiklusTopics(System.getenv(INPUTS), System.getenv(OUTPUTS));
         Processor processor = new Processor(
-                inputAddressableTopics,
-                outputAdressableTopics,
-                parseContentTypes(System.getenv(OUTPUT_CONTENT_TYPES), outputAdressableTopics.size()),
+                liiklusTopics,
+                parseContentTypes(System.getenv(OUTPUT_CONTENT_TYPES), liiklusTopics.getOutputCount()),
                 System.getenv(GROUP),
                 ReactorRiffGrpc.newReactorStub(fnChannel));
 
@@ -171,31 +204,22 @@ public class Processor {
         }
     }
 
-    public Processor(List<FullyQualifiedTopic> inputs,
-                     List<FullyQualifiedTopic> outputs,
+    public Processor(LiiklusTopics topics,
                      List<String> outputContentTypes,
                      String group,
                      ReactorRiffGrpc.ReactorRiffStub riffStub) {
 
-        this.inputs = inputs;
-        this.outputs = outputs;
-        Set<FullyQualifiedTopic> allGateways = new HashSet<>(inputs);
-        allGateways.addAll(outputs);
-
-        this.liiklusInstancesPerAddress = indexByAddress(allGateways);
+        this.topics = topics;
         this.outputContentTypes = outputContentTypes;
         this.riffStub = riffStub;
         this.group = group;
     }
 
-    public void run() {
-        internalRun().blockLast();
-    }
 
-    Flux<PublishReply> internalRun() {
-        return Flux.fromIterable(inputs)
+    public void run() {
+        Flux.fromIterable(this.topics.inputs)
                 .flatMap(fullyQualifiedTopic -> {
-                    ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub inputLiiklus = liiklusInstancesPerAddress.get(fullyQualifiedTopic.getGatewayAddress());
+                    ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub inputLiiklus = this.topics.stubPerAddress.get(fullyQualifiedTopic.getGatewayAddress());
                     return inputLiiklus.subscribe(subscribeRequestForInput(fullyQualifiedTopic.getTopic()))
                             .filter(SubscribeReply::hasAssignment)
                             .map(SubscribeReply::getAssignment)
@@ -211,10 +235,10 @@ public class Processor {
                 .concatMap(identity())
                 .concatMap(m -> {
                     OutputFrame next = m.getData();
-                    FullyQualifiedTopic output = outputs.get(next.getResultIndex());
-                    ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = liiklusInstancesPerAddress.get(output.getGatewayAddress());
+                    FullyQualifiedTopic output = this.topics.outputs.get(next.getResultIndex());
+                    ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = this.topics.stubPerAddress.get(output.getGatewayAddress());
                     return outputLiiklus.publish(createPublishRequest(next, output.getTopic()));
-                });
+                }).blockLast();
     }
 
     private Mono<Empty> ack(FullyQualifiedTopic topic, ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub stub, ReceiveReply receiveReply, Assignment assignment) {
@@ -225,22 +249,6 @@ public class Processor {
                 .setPartition(assignment.getPartition())
                 .setTopic(topic.getTopic())
                 .build());
-    }
-
-    private static Map<String, ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub> indexByAddress(
-            Collection<FullyQualifiedTopic> fullyQualifiedTopics) {
-        return fullyQualifiedTopics.stream()
-                .map(FullyQualifiedTopic::getGatewayAddress)
-                .distinct()
-                .collect(Collectors.toMap(
-                        address -> address,
-                        address -> ReactorLiiklusServiceGrpc.newReactorStub(
-                                NettyChannelBuilder.forTarget(address)
-                                        .usePlaintext()
-                                        .build())
-                        )
-                )
-                ;
     }
 
     private Flux<OutputSignal> invoke(Flux<InputFrame> in) {
@@ -283,7 +291,7 @@ public class Processor {
      * This converts a liiklus received message (representing an at-rest riff {@link Message}) into an RPC {@link InputFrame}.
      */
     private InputFrame toRiffSignal(ReceiveReply receiveReply, FullyQualifiedTopic fullyQualifiedTopic) {
-        int inputIndex = inputs.indexOf(fullyQualifiedTopic);
+        int inputIndex = this.topics.inputs.indexOf(fullyQualifiedTopic);
         if (inputIndex == -1) {
             throw new RuntimeException("Unknown topic: " + fullyQualifiedTopic);
         }
