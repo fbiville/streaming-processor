@@ -310,7 +310,11 @@ public class Processor {
 
         return riffStub.invoke(Flux.concat(
                 Flux.just(start), //
-                in.map(frame -> InputSignal.newBuilder().setData(frame).build())));
+                in.map(frame -> InputSignal.newBuilder().setData(frame).build()))
+        ).onErrorResume(throwable -> {
+            System.err.printf("%s\n", throwable);
+            return Flux.empty();
+        });
     }
 
     /**
