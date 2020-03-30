@@ -22,6 +22,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -262,14 +263,13 @@ public class Processor {
                 .takeUntilOther(killSignal)
                 .transform(this::riffWindowing)
                 .map(this::invoke)
-                .concatMap(flux ->
-                        flux.concatMap(m -> {
-                            OutputFrame next = m.getData();
-                            FullyQualifiedTopic output = outputs.get(next.getResultIndex());
-                            ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = liiklusInstancesPerAddress.get(output.getGatewayAddress());
-                            return outputLiiklus.publish(createPublishRequest(next, output.getTopic()));
-                        })
-                )
+                .concatMap(Function.identity())
+                .concatMap(m -> {
+                    OutputFrame next = m.getData();
+                    FullyQualifiedTopic output = outputs.get(next.getResultIndex());
+                    ReactorLiiklusServiceGrpc.ReactorLiiklusServiceStub outputLiiklus = liiklusInstancesPerAddress.get(output.getGatewayAddress());
+                    return outputLiiklus.publish(createPublishRequest(next, output.getTopic()));
+                })
                 .blockLast();
     }
 
